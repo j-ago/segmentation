@@ -1,0 +1,1239 @@
+/*Get all the customer purchase data*/
+
+OPTIONS COMPRESS=YES;
+PROC SQL;
+CONNECT TO SYBASEIQ as con1
+(HOST='172.31.215.191' SERVER=dwhiq PORT=2638 authdomain=SybaseIQ_Auth);
+
+
+Create Table all_buyers as 
+		SELECT
+			*
+		FROM CONNECTION TO con1 
+
+(
+select					
+customer_id,
+do_date,
+sum(amount_signed) as g_amt
+from
+dwh.daily_order
+where
+do_date between &last_1year and &ed_date_1Y 
+and do_action in ('Order','Cancel') 
+and amount_signed<>0
+group by
+customer_id,
+do_date
+having
+g_amt >0
+
+);
+
+quit;
+
+/*Get NN data*/
+
+
+
+OPTIONS COMPRESS=YES;
+PROC SQL;
+CONNECT TO SYBASEIQ as con1
+(HOST='172.31.215.191' SERVER=dwhiq PORT=2638 authdomain=SybaseIQ_Auth);
+
+
+Create Table NN as 
+		SELECT
+			*
+		FROM CONNECTION TO con1 
+
+(
+select
+kyakuno
+from
+oms.m_kokyaku_nn2
+where
+NN_JUCTRKBI between &last_1year and &ed_date_1Y 
+
+
+
+);
+
+quit;
+
+proc sql;/*max_date*/
+create table max_date as 
+select	
+distinct customer_id,
+max(do_date) as max_date
+from work.all_buyers
+group by
+customer_id;
+run;
+
+
+proc sql;/*olympic_churn*/
+create table olympic_churn as 
+select	
+distinct customer_id,
+max_date
+from work.max_date
+where
+max_date between &st_date and &ed_date;
+run;
+
+
+proc sql;/*olympic_churn_past_data*/
+create table olympic_churn_data as 
+select	
+a.customer_id,
+b.do_date,
+b.g_amt
+from work.olympic_churn a
+inner join work.all_buyers b on
+a.customer_id = b.customer_id
+where
+b.do_date between &last_1year and &ed_date 
+and a.customer_id not in(select kyakuno from work.nn)
+;
+run;
+
+/*sort by do_date*/
+proc sort 
+data=olympic_churn_data 
+out=temp_1;
+  by customer_id do_date;
+run;
+
+/*put sequence number*/
+Data temp_2;
+Set temp_1;
+By customer_id
+;
+retain Seq 0;
+if first.customer_id then seq = 0;
+seq + 1;
+Run;
+
+/*select cutomer above 2 times frequency*/
+Data churn_above2;
+Set temp_2;
+if Seq>1;
+run;
+
+
+proc sql;/*churn_past_data*/
+create table churn_data2 as 
+select	
+distinct a.customer_id,
+a.do_date,
+a.g_amt,
+a.Seq
+from
+work.temp_2 a
+inner join work.churn_above2 b on
+a.customer_id = b.customer_id
+order by customer_id, Seq
+
+;
+run;
+proc sql;/*churn_dif*/
+create table churn_dif as 
+select	
+a.customer_id,
+a.do_date,
+a.g_amt,
+a.Seq,
+b.Seq as Seq2,
+b.do_date as do_date2,
+input(put(b.do_date,8.),yymmdd8.) format=yymmddn8. as date_a,
+input(put(a.do_date,8.),yymmdd8.) format=yymmddn8. as date_b
+
+from
+work.churn_data2 a
+inner join work.churn_data2 b on
+a.customer_id = b.customer_id
+and a.Seq +1 = b.Seq
+;
+run;
+
+
+proc sql;/*churn_dif*/
+create table churn_dif as 
+select	
+customer_id,
+do_date,
+g_amt,
+Seq,
+Seq2,
+do_date2,
+
+date_a,
+date_b,
+date_a - date_b as diff
+
+from
+work.churn_dif
+;
+run;
+proc sql;/*get the latest Seq*/
+create table Latest_diff as 
+
+select 
+customer_id,
+max(Seq) as Seq3
+from work.churn_dif
+group by
+customer_id 
+
+;
+run;
+
+proc sql;/*get the lates Diff*/
+create table Latest_diff2 as 
+
+select 
+a.customer_id,
+a.diff
+from work.churn_dif a
+inner join work.Latest_diff b on
+a.customer_id = b.customer_id
+and a.Seq = b.Seq3 
+
+;
+run;
+
+proc sql;/*churn_dif_stats + info user*/
+create table churn_final as 
+select	
+distinct a.customer_id,
+
+min(a.diff) as itvl_min_all,
+round((AVG(a.diff)),0.1) as ITVL_MEAN_ALL,
+round((median(a.diff)),0.1) as ITVL_median_ALL,
+round((max(a.diff)),0.1) as ITVL_MAX_ALL,
+c.diff as ITVL_Latest
+
+from
+work.churn_dif a
+/*inner join work.info b on
+a.customer_id = b.customer_id*/
+inner join Latest_diff2 c on
+a.customer_id = c.customer_id
+
+group by
+a.customer_id
+;
+run;
+
+
+proc sql;/*Active customer without NN*/
+create table active_customer as 
+select	
+distinct customer_id,
+max_date
+from work.max_date
+where
+max_date between &st_date_1Y and &ed_date_1Y 
+and customer_id not in(select kyakuno from work.nn)
+;
+run;
+
+proc sql;/*active_past_data*/
+create table active_data as 
+select	
+a.customer_id,
+b.do_date,
+b.g_amt
+from work.active_customer a
+inner join work.all_buyers b on
+a.customer_id = b.customer_id
+where
+b.do_date between &past_1Y and &ed_date_1Y
+
+;
+run;
+
+/*sort by do_date*/
+proc sort 
+data=active_data 
+out=data_1;
+  by customer_id do_date;
+run;
+
+
+/*put sequence number*/
+Data data_2;
+Set data_1;
+By customer_id
+;
+retain Seq 0;
+if first.customer_id then seq = 0;
+seq + 1;
+Run;
+
+/*select cutomer above 2 times frequency*/
+Data active_above2;
+Set data_2;
+if Seq>1;
+run;
+
+proc sql;/*active_past_data*/
+create table active_data2 as 
+select	
+distinct a.customer_id,
+a.do_date,
+a.g_amt,
+a.Seq
+from
+work.data_2 a
+inner join work.active_above2 b on
+a.customer_id = b.customer_id
+order by customer_id, Seq
+
+;
+run;
+
+proc sql;/*active_dif*/
+create table active_dif as 
+select	
+a.customer_id,
+a.do_date,
+a.g_amt,
+a.Seq,
+b.Seq as Seq2,
+b.do_date as do_date2,
+input(put(b.do_date,8.),yymmdd8.) format=yymmddn8. as date_a,
+input(put(a.do_date,8.),yymmdd8.) format=yymmddn8. as date_b
+
+from
+work.active_data2 a
+inner join work.active_data2 b on
+a.customer_id = b.customer_id
+and a.Seq +1 = b.Seq
+;
+run;
+
+proc sql;/*active_dif*/
+create table active_dif as 
+select	
+customer_id,
+do_date,
+g_amt,
+Seq,
+Seq2,
+do_date2,
+
+date_a,
+date_b,
+date_a - date_b as diff
+
+from
+work.active_dif
+;
+run;
+
+
+
+
+proc sql;/*get the latest Seq*/
+create table Latest_diff_active as 
+
+select 
+customer_id,
+max(Seq) as Seq3
+from work.active_dif
+group by
+customer_id 
+
+;
+run;
+
+proc sql;/*get the lates Diff*/
+create table Latest_diff2_active as 
+
+select 
+a.customer_id,
+a.diff
+from work.active_dif a
+inner join work.Latest_diff_active b on
+a.customer_id = b.customer_id
+and a.Seq = b.Seq3 
+
+;
+run;
+
+
+proc sql;/*active_dif_stats*/
+create table active_final as 
+select	
+distinct a.customer_id,
+
+min(a.diff) as itvl_min_all,
+round((AVG(a.diff)),0.1) as ITVL_MEAN_ALL,
+round((median(a.diff)),0.1) as ITVL_median_ALL,
+round((max(a.diff)),0.1) as ITVL_MAX_ALL,
+b.diff as ITVL_Latest
+from
+work.active_dif a
+inner join work.latest_diff2_active b on
+a.customer_id = b.customer_id
+
+group by
+a.customer_id
+;
+run;
+
+
+
+
+PROC SURVEYSELECT DATA=work.ACTIVE_FINAL
+	OUT=WORK.ACTIVE_FINAL2
+	METHOD=SRS
+	N= 10000;
+RUN;
+
+PROC SURVEYSELECT DATA=work.churn_FINAL
+	OUT=WORK.churn_FINAL2
+	METHOD=SRS
+	N= 10000;
+RUN;
+
+proc sql;/*merge*/
+create table churn_ITVL as 
+select	
+a.customer_id,
+case when a.customer_id = a.customer_id then 0 else 1 end as response,
+itvl_min_all,
+ ITVL_MEAN_ALL,
+ ITVL_median_ALL,
+ITVL_MAX_ALL,
+ITVL_Latest
+
+from
+work.active_final2 a
+
+union
+
+select	
+b.customer_id,
+case when b.customer_id = b.customer_id then 1 else 0 end as response,
+itvl_min_all,
+ ITVL_MEAN_ALL,
+ ITVL_median_ALL,
+ITVL_MAX_ALL,
+ITVL_Latest
+
+from
+work.churn_final2 b
+
+
+
+
+
+;
+run;
+
+
+
+
+
+PROC SQL;/*all_sales*/
+CONNECT TO SYBASEIQ as con1
+(HOST='172.31.215.191' SERVER=dwhiq PORT=2638 authdomain=SybaseIQ_Auth);
+
+Create Table all_sales as 		
+SELECT
+			*
+		FROM CONNECTION TO con1 
+
+(
+select					
+customer_id					
+,case when price_type='TSV' then 'TSV'	
+when price_type='VAL' then 'VAL'					
+when price_type='REG' then 'REG'					
+else 'OTHER' end as pricetype	
+,case when NAME_D in ('06','40','45','57','58','60','61','UNKNOWN') then 'PC'
+when NAME_D in ('70','71','72','73') then 'APP'
+when NAME_D in ('44','46','63','80','81','82','83') then 'SP'
+when NAME_D in ('07','08','09','30','31','32','41','42','43','62') then 'FP'
+when NAME_D in ('01','20','90') then 'TSR'
+else 'IVR' end as keiro	
+,case when ac.name_c='EC' then 'EC' else 'Phone' end as route
+,md_category					
+,sub_category					
+,SHODBUN || '_' || SHOCBUN as cat_2					
+,brandcd					
+,skn								
+,sum(amount_signed) sales										
+from dwh.DAILY_ORDER a					
+inner join act_perf.M_ANALYSIS_STATUS ac					
+on ac.ST_KBN = 1 and a.ROUTE = ac.KBN_NAME					
+inner join dwh.m_skn b 					
+on skn=b.hinban					
+where					
+do_date between &last_1year AND &ed_date																	
+and a.skn not in ('560567','560568','560569','560570') 					
+and do_action in ('Order','Cancel')									
+and amount_signed <> 0					
+group by					
+customer_id					
+,case when price_type='TSV' then 'TSV'	
+when price_type='VAL' then 'VAL'					
+when price_type='REG' then 'REG'					
+else 'OTHER' end
+,keiro
+,route	
+,md_category					
+,sub_category					
+,SHODBUN || '_' || SHOCBUN					
+,brandcd					
+,skn					
+having sum(amount_signed) >0);
+run;
+
+
+
+PROC SQL;/*recency*/
+CONNECT TO SYBASEIQ as con1
+(HOST='172.31.215.191' SERVER=dwhiq PORT=2638 authdomain=SybaseIQ_Auth);
+
+Create Table recency as 		
+SELECT
+			*
+		FROM CONNECTION TO con1 
+(
+SELECT			
+customer_id			
+,DATEDIFF(DAY, MAX(CAST(CAST(DO_DATE AS VARCHAR(8)) AS DATE)), CAST(&ed_date_st AS DATE)) AS recency_days					
+FROM			
+(select			
+customer_id			
+,order_no 			
+,order_line_no			
+,do_date			
+,sum(amount_signed) sales 			
+from  dwh.daily_order a			
+where do_date between &last_1year AND &ed_date											
+and a.skn not in ('560567','560568','560569','560570')			
+and DO_ACTION in('Order','Cancel')						
+group by			
+customer_id			
+,order_no 			
+,order_line_no			
+,do_date			
+having sum(amount_signed)>0 ) t			
+group by			
+customer_id	);
+run;	
+	
+
+
+PROC SQL;/*age*/
+CONNECT TO SYBASEIQ as con1
+(HOST='172.31.215.191' SERVER=dwhiq PORT=2638 authdomain=SybaseIQ_Auth);
+
+Create Table age as 		
+SELECT
+			*
+		FROM CONNECTION TO con1 
+
+(
+select 
+distinct kyakuno as customer_id				
+,CASE WHEN M_KOKYAKU.BIRTHYY IN (0,999,9999) THEN 59 ELSE YEAR(CAST(CAST(&ed_date_st AS VARCHAR(8)) AS DATE))-M_KOKYAKU.BIRTHYY END as age								
+from OMS.M_KOKYAKU				
+where kyakuno in (			
+select					
+customer_id									
+from					
+(					
+select									
+a.CUSTOMER_ID,					
+a.ORDER_NO as juchuno,					
+a.ORDER_LINE_NO as juchugyo										
+,sum(amount_signed) sales					
+from DWH.DAILY_ORDER a					
+where					
+a.skn not in ('560567','560568','560569','560570')					
+and a.do_date between &last_1year AND &ed_date														
+and a.do_action in ('Order','Cancel')					
+group by										
+a.CUSTOMER_ID,					
+a.ORDER_NO,					
+a.ORDER_LINE_NO									
+having sum(a.amount_signed) > 0					
+) t					
+));
+run;
+
+
+proc sql;/*age_range*/
+create table age_range as
+select
+customer_id
+,CASE   WHEN AGE BETWEEN 1 AND 39 THEN 1 else 0 end as Under40
+,CASE   WHEN AGE BETWEEN 40 AND 44 THEN 1 else 0 end as Age40_44
+,CASE   WHEN AGE BETWEEN 45 AND 49 THEN 1 else 0 end as Age45_49        
+,CASE   WHEN AGE BETWEEN 50 AND 54 THEN 1 else 0 end as Age50_54
+,CASE   WHEN AGE BETWEEN 55 AND 59 THEN 1 else 0 end as Age55_59
+,CASE   WHEN AGE BETWEEN 60 AND 64 THEN 1 else 0 end as Age60_64
+,CASE   WHEN AGE BETWEEN 65 AND 69 THEN 1 else 0 end as Age65_69
+,CASE   WHEN AGE BETWEEN 70 AND 74 THEN 1 else 0 end as Age70_74
+,CASE   WHEN AGE BETWEEN 75 AND 79 THEN 1 else 0 end as Age75_79
+,CASE   WHEN AGE >= 80 THEN 1 else 0 end as Over80        
+from age;
+run;
+
+
+
+PROC SQL;/*freq*/
+CONNECT TO SYBASEIQ as con1
+(HOST='172.31.215.191' SERVER=dwhiq PORT=2638 authdomain=SybaseIQ_Auth);
+
+Create Table freq as 		
+SELECT
+			*
+		FROM CONNECTION TO con1 
+(
+select		
+customer_id	
+,count(distinct juchuno) as order_cnt				
+from		
+(		
+select		
+a.CUSTOMER_ID		
+,a.ORDER_NO as juchuno		
+,a.ORDER_LINE_NO as juchugyo		
+,sum(amount_signed) sales		
+from		
+DWH.DAILY_ORDER a		
+where		
+a.skn not in ('560567','560568','560569','560570')		
+and a.do_date between  &last_1year AND &ed_date															
+and a.do_action in ('Order','Cancel')			
+group by		
+a.CUSTOMER_ID		
+,a.ORDER_NO		
+,a.ORDER_LINE_NO		
+having		
+sum(a.amount_signed) > 0		
+) t		
+group by		
+customer_id);
+run;	
+
+
+
+
+
+
+proc sql;/*buyers_all*/
+create table buyers_all as 
+select		
+*
+from work.churn_itvl
+
+;
+run;
+
+
+
+proc sql;/*price*/
+create table price as 
+select		
+customer_id		
+,sum(case when pricetype='TSV' then sales else 0 end) as tsv_sales		
+,sum(case when pricetype='VAL' then sales else 0 end) as val_sales				
+,sum(case when pricetype='REG' then sales else 0 end) as reg_sales		
+,sum(case when pricetype='OTHER' then sales else 0 end) as other_sales	
+,sum(sales) as total_sales
+from all_sales
+group by		
+customer_id;
+run;
+
+
+proc sql;/*route*/
+create table route as 
+select		
+customer_id		
+,sum(case when route='EC' then sales else 0 end) as ec_sales		
+,sum(case when route='Phone' then sales else 0 end) as phone_sales
+,sum(case when keiro='TSR' then sales else 0 end) as tsr_sales		
+,sum(case when keiro='IVR' then sales else 0 end) as ivr_sales		
+,sum(sales) as total_sales
+from all_sales
+group by		
+customer_id;
+run;
+
+
+proc sql;/*price_share*/
+create table price_share as 
+select	
+customer_id	
+,tsv_sales / total_sales as tsv_share	
+,val_sales / total_sales  as val_share	
+,reg_sales  / total_sales  as reg_share	
+,other_sales  / total_sales  as other_share	
+from price;
+run;
+
+
+proc sql;/*route_share*/
+create table route_share as 
+select	
+customer_id	
+,ec_sales  / total_sales  as ec_pen
+,phone_sales  / total_sales  as phone_pen
+,tsr_sales  / total_sales  as tsr_pen
+,ivr_sales  / total_sales  as ivr_pen
+from route;
+run;
+
+
+
+proc sql;/*cat_sales*/
+create table cat_sales as 
+select									
+customer_id									
+,sum(case when md_category='01:JW' then sales else 0 end) as jw_sales									
+,sum(case when md_category='02:HF' then sales else 0 end) as hf_sales									
+,sum(case when md_category='03:BT' then sales else 0 end) as bt_sales									
+,sum(case when md_category='04:FA' then sales else 0 end) as fa_sales									
+,sum(case when md_category='05:FG' then sales else 0 end) as fg_sales									
+,sum(case when md_category='06:EA' then sales else 0 end) as ea_sales									
+,sum(case when md_category='07:HG' then sales else 0 end) as hg_sales									
+,sum(case when md_category='08:KF' then sales else 0 end) as kf_sales
+,sum(sales) as total_sales
+from all_sales							
+group by									
+customer_id	;
+run;
+
+
+proc sql;/*cat_flg*/
+create table cat_flg as 
+select									
+customer_id									
+,sum(case when jw_sales>0 then 1 else 0 end) as jw_flg								
+,sum(case when hf_sales>0 then 1 else 0 end) as hf_flg								
+,sum(case when bt_sales>0 then 1 else 0 end) as bt_flg								
+,sum(case when fa_sales>0 then 1 else 0 end) as fa_flg								
+,sum(case when fg_sales>0 then 1 else 0 end) as fg_flg								
+,sum(case when ea_sales>0 then 1 else 0 end) as ea_flg								
+,sum(case when hg_sales>0 then 1 else 0 end) as hg_flg								
+,sum(case when kf_sales>0 then 1 else 0 end) as kf_flg								
+from cat_sales							
+group by									
+customer_id	;
+run;
+
+
+proc sql;/*cat_share*/
+create table cat_share as 
+select									
+customer_id									
+,jw_sales  / total_sales  as jw_share									
+,hf_sales  / total_sales  as hf_share									
+,bt_sales  / total_sales  as bt_share									
+,fa_sales  / total_sales  as fa_share									
+,fg_sales  / total_sales  as fg_share									
+,ea_sales  / total_sales  as ea_share									
+,hg_sales  / total_sales  as hg_share									
+,kf_sales  / total_sales  as kf_share																						
+from cat_sales;
+run;
+
+
+/* target期間中に売上1,000万円以上のサブカテ*/
+
+proc sql;/*cat_2_sales*/
+create table cat_2_sales as 
+select							
+customer_id	
+,sum(case when cat_2='10_06' then sales else 0 end) as s_10_06
+,sum(case when cat_2='20_01' then sales else 0 end) as s_20_01
+,sum(case when cat_2='25_01' then sales else 0 end) as s_25_01
+,sum(case when cat_2='91_15' then sales else 0 end) as s_91_15
+,sum(case when cat_2='32_01' then sales else 0 end) as s_32_01
+,sum(case when cat_2='10_03' then sales else 0 end) as s_10_03
+,sum(case when cat_2='10_05' then sales else 0 end) as s_10_05
+,sum(case when cat_2='10_10' then sales else 0 end) as s_10_10
+,sum(case when cat_2='31_02' then sales else 0 end) as s_31_02
+,sum(case when cat_2='31_01' then sales else 0 end) as s_31_01
+,sum(case when cat_2='33_02' then sales else 0 end) as s_33_02
+,sum(case when cat_2='90_16' then sales else 0 end) as s_90_16
+,sum(case when cat_2='31_05' then sales else 0 end) as s_31_05
+,sum(case when cat_2='33_03' then sales else 0 end) as s_33_03
+,sum(case when cat_2='10_99' then sales else 0 end) as s_10_99
+,sum(case when cat_2='25_02' then sales else 0 end) as s_25_02
+,sum(case when cat_2='33_01' then sales else 0 end) as s_33_01
+,sum(case when cat_2='20_02' then sales else 0 end) as s_20_02
+,sum(case when cat_2='31_06' then sales else 0 end) as s_31_06
+,sum(case when cat_2='94_15' then sales else 0 end) as s_94_15
+,sum(case when cat_2='93_21' then sales else 0 end) as s_93_21
+,sum(case when cat_2='33_04' then sales else 0 end) as s_33_04
+,sum(case when cat_2='34_04' then sales else 0 end) as s_34_04
+,sum(case when cat_2='93_02' then sales else 0 end) as s_93_02
+,sum(case when cat_2='34_05' then sales else 0 end) as s_34_05
+,sum(case when cat_2='93_11' then sales else 0 end) as s_93_11
+,sum(case when cat_2='93_03' then sales else 0 end) as s_93_03
+,sum(case when cat_2='34_01' then sales else 0 end) as s_34_01
+,sum(case when cat_2='34_06' then sales else 0 end) as s_34_06
+,sum(case when cat_2='93_12' then sales else 0 end) as s_93_12
+,sum(case when cat_2='93_06' then sales else 0 end) as s_93_06
+,sum(case when cat_2='33_05' then sales else 0 end) as s_33_05
+,sum(case when cat_2='18_99' then sales else 0 end) as s_18_99
+,sum(case when cat_2='31_03' then sales else 0 end) as s_31_03
+,sum(case when cat_2='93_05' then sales else 0 end) as s_93_05
+,sum(case when cat_2='93_15' then sales else 0 end) as s_93_15
+,sum(case when cat_2='10_01' then sales else 0 end) as s_10_01
+,sum(case when cat_2='93_99' then sales else 0 end) as s_93_99
+,sum(case when cat_2='91_00' then sales else 0 end) as s_91_00
+,sum(case when cat_2='94_06' then sales else 0 end) as s_94_06
+,sum(case when cat_2='94_31' then sales else 0 end) as s_94_31
+,sum(case when cat_2='93_00' then sales else 0 end) as s_93_00
+,sum(case when cat_2='34_08' then sales else 0 end) as s_34_08
+,sum(case when cat_2='93_14' then sales else 0 end) as s_93_14
+,sum(case when cat_2='94_11' then sales else 0 end) as s_94_11
+,sum(case when cat_2='93_10' then sales else 0 end) as s_93_10	
+,sum(sales) as total_sales											
+from all_sales 	
+group by							
+customer_id;
+run;
+
+
+proc sql;/*cat_2_flg*/
+create table cat_2_flg	as 
+select							
+customer_id				
+,sum(case when s_10_06>0 then 1 else 0 end) as flg_10_06
+,sum(case when s_20_01>0 then 1 else 0 end) as flg_20_01
+,sum(case when s_25_01>0 then 1 else 0 end) as flg_25_01
+,sum(case when s_91_15>0 then 1 else 0 end) as flg_91_15
+,sum(case when s_32_01>0 then 1 else 0 end) as flg_32_01
+,sum(case when s_10_03>0 then 1 else 0 end) as flg_10_03
+,sum(case when s_10_05>0 then 1 else 0 end) as flg_10_05
+,sum(case when s_10_10>0 then 1 else 0 end) as flg_10_10
+,sum(case when s_31_02>0 then 1 else 0 end) as flg_31_02
+,sum(case when s_31_01>0 then 1 else 0 end) as flg_31_01
+,sum(case when s_33_02>0 then 1 else 0 end) as flg_33_02
+,sum(case when s_90_16>0 then 1 else 0 end) as flg_90_16
+,sum(case when s_31_05>0 then 1 else 0 end) as flg_31_05
+,sum(case when s_33_03>0 then 1 else 0 end) as flg_33_03
+,sum(case when s_10_99>0 then 1 else 0 end) as flg_10_99
+,sum(case when s_25_02>0 then 1 else 0 end) as flg_25_02
+,sum(case when s_33_01>0 then 1 else 0 end) as flg_33_01
+,sum(case when s_20_02>0 then 1 else 0 end) as flg_20_02
+,sum(case when s_31_06>0 then 1 else 0 end) as flg_31_06
+,sum(case when s_94_15>0 then 1 else 0 end) as flg_94_15
+,sum(case when s_93_21>0 then 1 else 0 end) as flg_93_21
+,sum(case when s_33_04>0 then 1 else 0 end) as flg_33_04
+,sum(case when s_34_04>0 then 1 else 0 end) as flg_34_04
+,sum(case when s_93_02>0 then 1 else 0 end) as flg_93_02
+,sum(case when s_34_05>0 then 1 else 0 end) as flg_34_05
+,sum(case when s_93_11>0 then 1 else 0 end) as flg_93_11
+,sum(case when s_93_03>0 then 1 else 0 end) as flg_93_03
+,sum(case when s_34_01>0 then 1 else 0 end) as flg_34_01
+,sum(case when s_34_06>0 then 1 else 0 end) as flg_34_06
+,sum(case when s_93_12>0 then 1 else 0 end) as flg_93_12
+,sum(case when s_93_06>0 then 1 else 0 end) as flg_93_06
+,sum(case when s_33_05>0 then 1 else 0 end) as flg_33_05
+,sum(case when s_18_99>0 then 1 else 0 end) as flg_18_99
+,sum(case when s_31_03>0 then 1 else 0 end) as flg_31_03
+,sum(case when s_93_05>0 then 1 else 0 end) as flg_93_05
+,sum(case when s_93_15>0 then 1 else 0 end) as flg_93_15
+,sum(case when s_10_01>0 then 1 else 0 end) as flg_10_01
+,sum(case when s_93_99>0 then 1 else 0 end) as flg_93_99
+,sum(case when s_91_00>0 then 1 else 0 end) as flg_91_00
+,sum(case when s_94_06>0 then 1 else 0 end) as flg_94_06
+,sum(case when s_94_31>0 then 1 else 0 end) as flg_94_31
+,sum(case when s_93_00>0 then 1 else 0 end) as flg_93_00
+,sum(case when s_34_08>0 then 1 else 0 end) as flg_34_08
+,sum(case when s_93_14>0 then 1 else 0 end) as flg_93_14
+,sum(case when s_94_11>0 then 1 else 0 end) as flg_94_11
+,sum(case when s_93_10>0 then 1 else 0 end) as flg_93_10				
+from cat_2_sales 	
+group by							
+customer_id;
+run;
+
+
+
+proc sql;/*cat_2_share*/
+create table cat_2_share as 
+select								
+customer_id								
+,s_10_06 / total_sales as share_10_06
+,s_20_01 / total_sales as share_20_01
+,s_25_01 / total_sales as share_25_01
+,s_91_15 / total_sales as share_91_15
+,s_32_01 / total_sales as share_32_01
+,s_10_03 / total_sales as share_10_03
+,s_10_05 / total_sales as share_10_05
+,s_10_10 / total_sales as share_10_10
+,s_31_02 / total_sales as share_31_02
+,s_31_01 / total_sales as share_31_01
+,s_33_02 / total_sales as share_33_02
+,s_90_16 / total_sales as share_90_16
+,s_31_05 / total_sales as share_31_05
+,s_33_03 / total_sales as share_33_03
+,s_10_99 / total_sales as share_10_99
+,s_25_02 / total_sales as share_25_02
+,s_33_01 / total_sales as share_33_01
+,s_20_02 / total_sales as share_20_02
+,s_31_06 / total_sales as share_31_06
+,s_94_15 / total_sales as share_94_15
+,s_93_21 / total_sales as share_93_21
+,s_33_04 / total_sales as share_33_04
+,s_34_04 / total_sales as share_34_04
+,s_93_02 / total_sales as share_93_02
+,s_34_05 / total_sales as share_34_05
+,s_93_11 / total_sales as share_93_11
+,s_93_03 / total_sales as share_93_03
+,s_34_01 / total_sales as share_34_01
+,s_34_06 / total_sales as share_34_06
+,s_93_12 / total_sales as share_93_12
+,s_93_06 / total_sales as share_93_06
+,s_33_05 / total_sales as share_33_05
+,s_18_99 / total_sales as share_18_99
+,s_31_03 / total_sales as share_31_03
+,s_93_05 / total_sales as share_93_05
+,s_93_15 / total_sales as share_93_15
+,s_10_01 / total_sales as share_10_01
+,s_93_99 / total_sales as share_93_99
+,s_91_00 / total_sales as share_91_00
+,s_94_06 / total_sales as share_94_06
+,s_94_31 / total_sales as share_94_31
+,s_93_00 / total_sales as share_93_00
+,s_34_08 / total_sales as share_34_08
+,s_93_14 / total_sales as share_93_14
+,s_94_11 / total_sales as share_94_11
+,s_93_10 / total_sales as share_93_10					
+from cat_2_sales;
+run;
+
+
+proc sql;/*plat*/
+create table plat as 
+select				
+customer_id				
+,pc_sales				
+,app_sales				
+,sp_sales				
+,fp_sales							
+,pc_sales  / sales_total  as pc_share				
+,app_sales  / sales_total  as app_share				
+,sp_sales  / sales_total  as sp_share				
+,fp_sales  / sales_total  as fp_share												
+from (				
+select				
+customer_id				
+,sum(case when keiro='PC' then sales else 0 end) as pc_sales				
+,sum(case when keiro='APP' then sales else 0 end) as app_sales				
+,sum(case when keiro='SP' then sales else 0 end) as sp_sales				
+,sum(case when keiro='FP' then sales else 0 end) as fp_sales						
+,sum(sales) as sales_total				
+from all_sales
+group by 
+customer_id) t;
+run; 
+
+
+
+proc sql;/*count */
+create table count as 
+select	
+customer_id	
+,count(distinct skn) as skn_cnt	
+,count(distinct brandcd) as brand_cnt	
+,count(distinct md_category) as cat_cnt		
+,count(distinct cat_2) as cat_2_cnt	
+from all_sales	
+group by 	
+customer_id;
+run;
+	
+
+
+
+
+proc sql;
+create table churn_trainning as 
+select
+b.customer_id
+,b.response
+,b.ITVL_MIN_ALL
+,b.ITVL_MEAN_ALL
+,b.ITVL_MAX_ALL
+,b.ITVL_Latest
+,q.total_sales
+,ec_sales
+,ec_pen
+,tsr_sales
+,ivr_sales
+,tsr_pen
+,ivr_pen
+,order_cnt
+,pc_sales
+,app_sales
+,sp_sales
+
+,pc_sales
+,app_sales
+,sp_sales
+,fp_sales
+,pc_share
+,app_share
+,sp_share
+,fp_share
+,tsv_sales
+,val_sales
+,reg_sales
+,other_sales
+,tsv_share
+,val_share
+,reg_share
+,other_share
+,age
+,Under40
+,Age40_44
+,Age45_49
+,Age50_54
+,Age55_59
+,Age60_64
+,Age65_69
+,Age70_74
+,Age75_79
+,Over80
+/*,recency_days*/
+,cat_cnt
+,cat_2_cnt
+,brand_cnt
+,skn_cnt
+
+,jw_sales
+,hf_sales
+,bt_sales
+,fa_sales
+,fg_sales
+,ea_sales
+,hg_sales
+,kf_sales
+,jw_flg
+,hf_flg
+,bt_flg
+,fa_flg
+,fg_flg
+,ea_flg
+,hg_flg
+,kf_flg
+,jw_share
+,hf_share
+,bt_share
+,fa_share
+,fg_share
+,ea_share
+,hg_share
+,kf_share
+,flg_10_06
+,flg_20_01
+,flg_25_01
+,flg_91_15
+,flg_32_01
+,flg_10_03
+,flg_10_05
+,flg_10_10
+,flg_31_02
+,flg_31_01
+,flg_33_02
+,flg_90_16
+,flg_31_05
+,flg_33_03
+,flg_10_99
+,flg_25_02
+,flg_33_01
+,flg_20_02
+,flg_31_06
+,flg_94_15
+,flg_93_21
+,flg_33_04
+,flg_34_04
+,flg_93_02
+,flg_34_05
+,flg_93_11
+,flg_93_03
+,flg_34_01
+,flg_34_06
+,flg_93_12
+,flg_93_06
+,flg_33_05
+,flg_18_99
+,flg_31_03
+,flg_93_05
+,flg_93_15
+,flg_10_01
+,flg_93_99
+,flg_91_00
+,flg_94_06
+,flg_94_31
+,flg_93_00
+,flg_34_08
+,flg_93_14
+,flg_94_11
+,flg_93_10
+,s_10_06
+,s_20_01
+,s_25_01
+,s_91_15
+,s_32_01
+,s_10_03
+,s_10_05
+,s_10_10
+,s_31_02
+,s_31_01
+,s_33_02
+,s_90_16
+,s_31_05
+,s_33_03
+,s_10_99
+,s_25_02
+,s_33_01
+,s_20_02
+,s_31_06
+,s_94_15
+,s_93_21
+,s_33_04
+,s_34_04
+,s_93_02
+,s_34_05
+,s_93_11
+,s_93_03
+,s_34_01
+,s_34_06
+,s_93_12
+,s_93_06
+,s_33_05
+,s_18_99
+,s_31_03
+,s_93_05
+,s_93_15
+,s_10_01
+,s_93_99
+,s_91_00
+,s_94_06
+,s_94_31
+,s_93_00
+,s_34_08
+,s_93_14
+,s_94_11
+,s_93_10
+,share_10_06
+,share_20_01
+,share_25_01
+,share_91_15
+,share_32_01
+,share_10_03
+,share_10_05
+,share_10_10
+,share_31_02
+,share_31_01
+,share_33_02
+,share_90_16
+,share_31_05
+,share_33_03
+,share_10_99
+,share_25_02
+,share_33_01
+,share_20_02
+,share_31_06
+,share_94_15
+,share_93_21
+,share_33_04
+,share_34_04
+,share_93_02
+,share_34_05
+,share_93_11
+,share_93_03
+,share_34_01
+,share_34_06
+,share_93_12
+,share_93_06
+,share_33_05
+,share_18_99
+,share_31_03
+,share_93_05
+,share_93_15
+,share_10_01
+,share_93_99
+,share_91_00
+,share_94_06
+,share_94_31
+,share_93_00
+,share_34_08
+,share_93_14
+,share_94_11
+,share_93_10
+from buyers_all b
+
+
+
+
+
+inner join cat_2_flg g
+on g.customer_id=b.customer_id
+
+inner join cat_2_sales h
+on h.customer_id=b.customer_id
+
+inner join cat_2_share i
+on i.customer_id=b.customer_id
+
+inner join cat_flg j
+on j.customer_id=b.customer_id
+
+inner join cat_sales k
+on k.customer_id=b.customer_id
+
+inner join cat_share l
+on l.customer_id=b.customer_id
+
+inner join count m
+on m.customer_id=b.customer_id
+
+inner join freq o
+on o.customer_id=b.customer_id
+
+inner join plat p
+on p.customer_id=b.customer_id
+
+inner join price q
+on q.customer_id=b.customer_id
+
+inner join price_share r
+on r.customer_id=b.customer_id
+
+inner join recency s
+on s.customer_id=b.customer_id
+
+inner join age v
+on v.customer_id=b.customer_id
+
+inner join age_range w
+on w.customer_id=b.customer_id
+
+inner join route x
+on x.customer_id=b.customer_id
+
+inner join route_share y
+on y.customer_id=b.customer_id
+
+
+;
+quit; 
+
+
